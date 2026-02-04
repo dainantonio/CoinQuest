@@ -1,16 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Lock, Unlock, Shield, Home, CheckCircle, TrendingUp, Heart, ShoppingBag,
-  ClipboardCheck, PlusCircle, Wifi, WifiOff
+  ClipboardCheck, PlusCircle, Wifi, WifiOff, LogOut, LogIn
 } from 'lucide-react';
 
 // FIREBASE IMPORTS
-import { db } from './lib/firebase';
+import { db, auth, googleProvider } from './lib/firebase';
 import { doc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore';
+import { signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
 
 // --- CONFIGURATION ---
-
-const FAMILY_ID = "demo-family"; // Shared ID for testing sync
 
 const CONTENT_BY_AGE = {
   '5-7': {
@@ -73,51 +72,53 @@ const INITIAL_STATE = {
   parentMode: false
 };
 
-// --- CLOUD LOGIC HOOK ---
+// --- HOOKS ---
 
-const useGameData = () => {
-  const [state, setState] = useState(null); // Null means "loading"
+const useGameData = (user) => {
+  const [state, setState] = useState(null); 
   const [notification, setNotification] = useState({ show: false, message: '', type: '' });
   const [connected, setConnected] = useState(false);
 
-  // 1. SYNC WITH FIREBASE
+  // 1. SYNC WITH FIREBASE (User Specific)
   useEffect(() => {
-    // Connect to the specific document "demo-family" in collection "families"
-    const docRef = doc(db, "families", FAMILY_ID);
+    if (!user) return; // Wait for login
+
+    // Uses the User's UID as the Family ID
+    const docRef = doc(db, "families", user.uid);
 
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
       setConnected(true);
       if (docSnap.exists()) {
-        // Data exists! Update local state
         setState(docSnap.data());
       } else {
-        // First time running? Create the initial data in the cloud
+        // Create new family account
         setDoc(docRef, {
           ...INITIAL_STATE,
           stocks: CONTENT_BY_AGE['8-10'].stocks,
-          dailyChores: CONTENT_BY_AGE['8-10'].chores
+          dailyChores: CONTENT_BY_AGE['8-10'].chores,
+          ownerEmail: user.email
         });
       }
     }, (error) => {
-      console.error("Firebase Sync Error:", error);
+      console.error("Sync Error:", error);
       setConnected(false);
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [user]);
 
-  // 2. STOCK MARKET SIMULATOR (Run locally but push updates)
+  // 2. STOCK MARKET SIMULATOR
   useEffect(() => {
-    if (!state) return; // Wait for load
+    if (!state || !user) return;
 
     const interval = setInterval(() => {
-      // Only run ticker if I am the "Parent" (to avoid conflicting updates from 2 devices)
-      // For MVP, we'll just let anyone update it but throttle it
-      if (Math.random() > 0.8) { 
+      // Simulate market movement locally, then push
+      // In a real app, this would be a server-side function
+      if (Math.random() > 0.7) { 
         const newStocks = { ...state.stocks };
         let hasChange = false;
         Object.keys(newStocks).forEach(key => {
-          const move = Math.floor(Math.random() * 5) - 2; // -2 to +2
+          const move = Math.floor(Math.random() * 5) - 2; 
           if (move !== 0) {
             newStocks[key] = { 
               ...newStocks[key], 
@@ -128,24 +129,23 @@ const useGameData = () => {
           }
         });
         if (hasChange) {
-          // Push new prices to cloud
-          const docRef = doc(db, "families", FAMILY_ID);
+          const docRef = doc(db, "families", user.uid);
           updateDoc(docRef, { stocks: newStocks });
         }
       }
     }, 5000); 
     return () => clearInterval(interval);
-  }, [state]);
+  }, [state, user]);
 
   const notify = (message, type = 'success') => {
     setNotification({ show: true, message, type });
     setTimeout(() => setNotification(prev => ({ ...prev, show: false })), 3000);
   };
 
-  // 3. ACTIONS (Now write to Cloud)
+  // 3. ACTIONS
   const saveToCloud = async (updates) => {
-    if (!state) return;
-    const docRef = doc(db, "families", FAMILY_ID);
+    if (!state || !user) return;
+    const docRef = doc(db, "families", user.uid);
     try {
       await updateDoc(docRef, updates);
     } catch (e) {
@@ -164,7 +164,6 @@ const useGameData = () => {
       notify(`Switched to Age ${age} Mode!`, 'celebrate');
     },
     toggleParentMode: () => {
-      // Parent mode is local-only preference
       setState(prev => ({ ...prev, parentMode: !prev.parentMode }));
       notify(!state.parentMode ? "Parent Mode Unlocked" : "Switched to Child Mode", "success");
     },
@@ -275,13 +274,15 @@ const Notification = ({ message, type, show }) => (
   </div>
 );
 
-const Header = ({ state, setAgeGroup, toggleParentMode, connected }) => (
+const Header = ({ state, setAgeGroup, toggleParentMode, connected, user, onLogout }) => (
   <div className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white p-4 pt-6 rounded-b-[2rem] shadow-lg relative overflow-hidden">
     <div className="absolute top-0 right-0 w-32 h-32 bg-white opacity-10 rounded-full -mr-10 -mt-10 blur-xl"></div>
     <div className="max-w-md mx-auto relative z-10">
       <div className="flex justify-between items-start mb-4">
         <div className="flex items-center gap-3">
-          <div className="w-12 h-12 bg-yellow-300 rounded-full flex items-center justify-center border-4 border-white/20 shadow-inner animate-bounce-slow text-2xl">🦁</div>
+          <div className="w-12 h-12 bg-yellow-300 rounded-full flex items-center justify-center border-4 border-white/20 shadow-inner animate-bounce-slow text-2xl overflow-hidden">
+            {user?.photoURL ? <img src={user.photoURL} alt="User" /> : "🦁"}
+          </div>
           <div>
             <h1 className="font-bold text-xl leading-none tracking-tight">CoinQuest</h1>
             <div className="flex items-center gap-2">
@@ -290,9 +291,14 @@ const Header = ({ state, setAgeGroup, toggleParentMode, connected }) => (
             </div>
           </div>
         </div>
-        <button onClick={toggleParentMode} className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${state.parentMode ? 'bg-red-500 text-white' : 'bg-white/20 text-white hover:bg-white/40'}`}>
-          {state.parentMode ? <Unlock size={16} /> : <Lock size={16} />}
-        </button>
+        <div className="flex gap-2">
+          <button onClick={toggleParentMode} className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${state.parentMode ? 'bg-red-500 text-white' : 'bg-white/20 text-white hover:bg-white/40'}`}>
+            {state.parentMode ? <Unlock size={16} /> : <Lock size={16} />}
+          </button>
+          <button onClick={onLogout} className="w-8 h-8 rounded-full flex items-center justify-center bg-white/20 text-white hover:bg-white/40">
+            <LogOut size={16} />
+          </button>
+        </div>
       </div>
       {!state.parentMode ? (
         <div className="flex justify-between items-end">
@@ -313,7 +319,7 @@ const Header = ({ state, setAgeGroup, toggleParentMode, connected }) => (
       ) : (
         <div className="bg-white/10 rounded-xl p-3 backdrop-blur-sm border border-white/20">
           <h2 className="font-bold flex items-center gap-2"><Shield size={16} /> Parent Dashboard</h2>
-          <p className="text-xs text-indigo-200">Sync ID: {FAMILY_ID}</p>
+          <p className="text-xs text-indigo-200 truncate max-w-[200px]">{user.email}</p>
         </div>
       )}
     </div>
@@ -457,7 +463,7 @@ const Shop = ({ items, balance, onBuy, inventory }) => (
   </div>
 );
 
-const ParentDashboard = ({ state, onApprove, onDeny, onAddChore }) => {
+const ParentDashboard = ({ state, user, onApprove, onDeny, onAddChore }) => {
   const [newChore, setNewChore] = useState({ text: '', reward: 10 });
   const pendingRequests = state.requests.filter(r => r.status === 'pending');
   const handleAddChore = () => { if(!newChore.text) return; onAddChore(newChore); setNewChore({ text: '', reward: 10 }); };
@@ -483,21 +489,68 @@ const ParentDashboard = ({ state, onApprove, onDeny, onAddChore }) => {
   );
 };
 
+const LoginScreen = ({ onLogin }) => (
+  <div className="min-h-screen bg-indigo-600 flex flex-col items-center justify-center p-6 text-center">
+    <div className="bg-white w-full max-w-sm rounded-3xl p-8 shadow-2xl animate-slide-up">
+      <div className="w-20 h-20 bg-yellow-400 rounded-full flex items-center justify-center text-4xl mb-6 mx-auto shadow-lg">🦁</div>
+      <h1 className="text-2xl font-black text-slate-800 mb-2">Welcome to CoinQuest</h1>
+      <p className="text-slate-500 mb-8 text-sm">The fun way to learn money skills.</p>
+      
+      <button 
+        onClick={onLogin}
+        className="w-full bg-slate-900 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-3 hover:bg-slate-800 transition-colors shadow-lg"
+      >
+        <LogIn size={20} />
+        Sign in with Google
+      </button>
+      <p className="text-xs text-slate-400 mt-6">Safe, secure, and private.</p>
+    </div>
+  </div>
+);
+
 // --- APP COMPONENT ---
 
 export default function App() {
   const [view, setView] = useState('home');
-  const { state, notification, connected, actions } = useGameData();
+  const [user, setUser] = useState(null);
+  const [loadingUser, setLoadingUser] = useState(true);
+  
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setLoadingUser(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
-  if (!state) return <div className="min-h-screen flex items-center justify-center text-slate-400">Loading Cloud Save...</div>;
+  const { state, notification, connected, actions } = useGameData(user);
+
+  const handleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (error) {
+      console.error("Login failed", error);
+    }
+  };
+
+  const handleLogout = async () => {
+    await signOut(auth);
+  };
+
+  if (loadingUser) return <div className="min-h-screen bg-indigo-600 flex items-center justify-center text-white">Loading...</div>;
+
+  if (!user) return <LoginScreen onLogin={handleLogin} />;
+
+  if (!state) return <div className="min-h-screen bg-indigo-600 flex items-center justify-center text-white">Syncing your Family Data...</div>;
 
   return (
     <div className="max-w-md mx-auto min-h-screen bg-white shadow-2xl overflow-hidden relative">
       <Notification {...notification} />
-      <Header state={state} setAgeGroup={actions.setAgeGroup} toggleParentMode={actions.toggleParentMode} connected={connected} />
+      <Header state={state} user={user} setAgeGroup={actions.setAgeGroup} toggleParentMode={actions.toggleParentMode} connected={connected} onLogout={handleLogout} />
       <main className="p-4 bg-pattern min-h-[calc(100vh-200px)]">
         {state.parentMode ? (
-          <ParentDashboard state={state} onApprove={actions.approveRequest} onDeny={actions.denyRequest} onAddChore={actions.addCustomChore} />
+          <ParentDashboard state={state} user={user} onApprove={actions.approveRequest} onDeny={actions.denyRequest} onAddChore={actions.addCustomChore} />
         ) : (
           <>
             {view === 'home' && <Dashboard state={state} />}
