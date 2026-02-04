@@ -1,10 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Lock, Unlock, Shield, Home, CheckCircle, TrendingUp, Heart, ShoppingBag,
-  ClipboardCheck, PlusCircle
+  ClipboardCheck, PlusCircle, Wifi, WifiOff
 } from 'lucide-react';
 
-// --- CONFIGURATION & DATA ---
+// FIREBASE IMPORTS
+import { db } from './lib/firebase';
+import { doc, onSnapshot, setDoc, updateDoc } from 'firebase/firestore';
+
+// --- CONFIGURATION ---
+
+const FAMILY_ID = "demo-family"; // Shared ID for testing sync
 
 const CONTENT_BY_AGE = {
   '5-7': {
@@ -67,170 +73,190 @@ const INITIAL_STATE = {
   parentMode: false
 };
 
-// --- HOOKS ---
+// --- CLOUD LOGIC HOOK ---
 
 const useGameData = () => {
-  const [state, setState] = useState(() => {
-    // Check local storage or use default
-    const saved = localStorage.getItem('coinquest_v7');
-    if (saved) return JSON.parse(saved);
-    
-    // Default setup
-    const defaultAge = '8-10';
-    return {
-      ...INITIAL_STATE,
-      ageGroup: defaultAge,
-      stocks: CONTENT_BY_AGE[defaultAge].stocks,
-      dailyChores: CONTENT_BY_AGE[defaultAge].chores
-    };
-  });
-
+  const [state, setState] = useState(null); // Null means "loading"
   const [notification, setNotification] = useState({ show: false, message: '', type: '' });
+  const [connected, setConnected] = useState(false);
 
-  // Save state on change
+  // 1. SYNC WITH FIREBASE
   useEffect(() => {
-    localStorage.setItem('coinquest_v7', JSON.stringify(state));
-  }, [state]);
+    // Connect to the specific document "demo-family" in collection "families"
+    const docRef = doc(db, "families", FAMILY_ID);
 
-  // Stock Market Ticker
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      setConnected(true);
+      if (docSnap.exists()) {
+        // Data exists! Update local state
+        setState(docSnap.data());
+      } else {
+        // First time running? Create the initial data in the cloud
+        setDoc(docRef, {
+          ...INITIAL_STATE,
+          stocks: CONTENT_BY_AGE['8-10'].stocks,
+          dailyChores: CONTENT_BY_AGE['8-10'].chores
+        });
+      }
+    }, (error) => {
+      console.error("Firebase Sync Error:", error);
+      setConnected(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // 2. STOCK MARKET SIMULATOR (Run locally but push updates)
   useEffect(() => {
+    if (!state) return; // Wait for load
+
     const interval = setInterval(() => {
-      setState(prev => {
-        const newStocks = { ...prev.stocks };
+      // Only run ticker if I am the "Parent" (to avoid conflicting updates from 2 devices)
+      // For MVP, we'll just let anyone update it but throttle it
+      if (Math.random() > 0.8) { 
+        const newStocks = { ...state.stocks };
         let hasChange = false;
         Object.keys(newStocks).forEach(key => {
-          const stock = newStocks[key];
-          const volatility = prev.ageGroup === '11+' ? 15 : 5;
-          const move = Math.floor(Math.random() * (volatility * 2 + 1)) - volatility;
+          const move = Math.floor(Math.random() * 5) - 2; // -2 to +2
           if (move !== 0) {
-            let newPrice = Math.max(1, stock.price + move);
-            newStocks[key] = { ...stock, price: newPrice, trend: move };
+            newStocks[key] = { 
+              ...newStocks[key], 
+              price: Math.max(1, newStocks[key].price + move),
+              trend: move 
+            };
             hasChange = true;
           }
         });
-        return hasChange ? { ...prev, stocks: newStocks } : prev;
-      });
-    }, 4000); 
+        if (hasChange) {
+          // Push new prices to cloud
+          const docRef = doc(db, "families", FAMILY_ID);
+          updateDoc(docRef, { stocks: newStocks });
+        }
+      }
+    }, 5000); 
     return () => clearInterval(interval);
-  }, []);
+  }, [state]);
 
   const notify = (message, type = 'success') => {
     setNotification({ show: true, message, type });
     setTimeout(() => setNotification(prev => ({ ...prev, show: false })), 3000);
   };
 
+  // 3. ACTIONS (Now write to Cloud)
+  const saveToCloud = async (updates) => {
+    if (!state) return;
+    const docRef = doc(db, "families", FAMILY_ID);
+    try {
+      await updateDoc(docRef, updates);
+    } catch (e) {
+      console.error("Save failed", e);
+      notify("Connection Error", "error");
+    }
+  };
+
   const actions = {
     setAgeGroup: (age) => {
-      setState(prev => ({
-        ...prev,
+      saveToCloud({
         ageGroup: age,
-        stocks: { ...CONTENT_BY_AGE[age].stocks },
-        dailyChores: [ ...CONTENT_BY_AGE[age].chores ]
-      }));
+        stocks: CONTENT_BY_AGE[age].stocks,
+        dailyChores: CONTENT_BY_AGE[age].chores
+      });
       notify(`Switched to Age ${age} Mode!`, 'celebrate');
     },
     toggleParentMode: () => {
+      // Parent mode is local-only preference
       setState(prev => ({ ...prev, parentMode: !prev.parentMode }));
-      notify(state.parentMode ? "Switched to Child Mode" : "Parent Mode Unlocked", "success");
+      notify(!state.parentMode ? "Parent Mode Unlocked" : "Switched to Child Mode", "success");
     },
     completeChore: (id) => {
       const chore = state.dailyChores.find(c => c.id === id);
       if (chore && !chore.done) {
-        setState(prev => ({
-          ...prev,
-          balance: prev.balance + chore.reward,
-          xp: prev.xp + 10,
-          dailyChores: prev.dailyChores.map(c => c.id === id ? { ...c, done: true } : c),
-          history: [{ desc: `Did chore: ${chore.text}`, amount: chore.reward }, ...prev.history].slice(0, 10)
-        }));
+        saveToCloud({
+          balance: state.balance + chore.reward,
+          xp: state.xp + 10,
+          dailyChores: state.dailyChores.map(c => c.id === id ? { ...c, done: true } : c),
+          history: [{ desc: `Did chore: ${chore.text}`, amount: chore.reward }, ...state.history].slice(0, 10)
+        });
         notify(`Earned $${chore.reward}! Great job!`, 'success');
       }
     },
     buyStock: (ticker) => {
       const stock = state.stocks[ticker];
       if (state.balance >= stock.price) {
-        setState(prev => ({
-          ...prev,
-          balance: prev.balance - stock.price,
-          stocks: { ...prev.stocks, [ticker]: { ...stock, owned: stock.owned + 1 } },
-          history: [{ desc: `Bought ${stock.name}`, amount: -stock.price }, ...prev.history].slice(0, 10)
-        }));
+        saveToCloud({
+          balance: state.balance - stock.price,
+          stocks: { ...state.stocks, [ticker]: { ...stock, owned: stock.owned + 1 } },
+          history: [{ desc: `Bought ${stock.name}`, amount: -stock.price }, ...state.history].slice(0, 10)
+        });
         notify(`Invested in ${stock.name}`, 'success');
       }
     },
     sellStock: (ticker) => {
       const stock = state.stocks[ticker];
       if (stock.owned > 0) {
-        setState(prev => ({
-          ...prev,
-          balance: prev.balance + stock.price,
-          stocks: { ...prev.stocks, [ticker]: { ...stock, owned: stock.owned - 1 } },
-          history: [{ desc: `Sold ${stock.name}`, amount: stock.price }, ...prev.history].slice(0, 10)
-        }));
+        saveToCloud({
+          balance: state.balance + stock.price,
+          stocks: { ...state.stocks, [ticker]: { ...stock, owned: stock.owned - 1 } },
+          history: [{ desc: `Sold ${stock.name}`, amount: stock.price }, ...state.history].slice(0, 10)
+        });
         notify(`Sold stock for $${stock.price}`, 'success');
       }
     },
     donate: (amount) => {
       if (state.balance >= amount) {
-        setState(prev => ({
-          ...prev,
-          balance: prev.balance - amount,
-          donations: prev.donations + amount,
-          xp: prev.xp + (amount * 2),
-          history: [{ desc: `Donated to Charity`, amount: -amount }, ...prev.history].slice(0, 10)
-        }));
+        saveToCloud({
+          balance: state.balance - amount,
+          donations: state.donations + amount,
+          xp: state.xp + (amount * 2),
+          history: [{ desc: `Donated to Charity`, amount: -amount }, ...state.history].slice(0, 10)
+        });
         notify(`Donated $${amount}. You are amazing!`, 'celebrate');
       }
     },
     buyItem: (item) => {
       if (item.type === 'collectible') {
-        setState(prev => ({
-          ...prev,
-          balance: prev.balance - item.price,
-          inventory: [...prev.inventory, item],
-          history: [{ desc: `Bought ${item.name}`, amount: -item.price }, ...prev.history].slice(0, 10)
-        }));
+        saveToCloud({
+          balance: state.balance - item.price,
+          inventory: [...state.inventory, item],
+          history: [{ desc: `Bought ${item.name}`, amount: -item.price }, ...state.history].slice(0, 10)
+        });
         notify(`Bought ${item.name}!`, 'celebrate');
       } else {
         const request = { id: Date.now(), name: item.name, price: item.price, status: 'pending' };
-        setState(prev => ({
-          ...prev,
-          balance: prev.balance - item.price,
-          requests: [...prev.requests, request],
-          history: [{ desc: `Requested ${item.name}`, amount: -item.price }, ...prev.history].slice(0, 10)
-        }));
+        saveToCloud({
+          balance: state.balance - item.price,
+          requests: [...state.requests, request],
+          history: [{ desc: `Requested ${item.name}`, amount: -item.price }, ...state.history].slice(0, 10)
+        });
         notify("Request sent to parents!", "success");
       }
     },
     approveRequest: (id) => {
-      setState(prev => ({
-        ...prev,
-        requests: prev.requests.map(r => r.id === id ? { ...r, status: 'approved' } : r),
-        inventory: [...prev.inventory, { name: prev.requests.find(r => r.id === id).name, icon: '🎁' }] 
-      }));
+      saveToCloud({
+        requests: state.requests.map(r => r.id === id ? { ...r, status: 'approved' } : r),
+        inventory: [...state.inventory, { name: state.requests.find(r => r.id === id).name, icon: '🎁' }] 
+      });
       notify("Request Approved", "success");
     },
     denyRequest: (id) => {
       const req = state.requests.find(r => r.id === id);
-      setState(prev => ({
-        ...prev,
-        balance: prev.balance + req.price,
-        requests: prev.requests.filter(r => r.id !== id),
-        history: [{ desc: `Refund: ${req.name} denied`, amount: req.price }, ...prev.history].slice(0, 10)
-      }));
+      saveToCloud({
+        balance: state.balance + req.price,
+        requests: state.requests.filter(r => r.id !== id),
+        history: [{ desc: `Refund: ${req.name} denied`, amount: req.price }, ...state.history].slice(0, 10)
+      });
       notify("Request Denied & Refunded", "success");
     },
     addCustomChore: (chore) => {
       const newChoreObj = { id: Date.now(), text: chore.text, reward: chore.reward, icon: "✨", done: false };
-      setState(prev => ({
-        ...prev,
-        dailyChores: [...prev.dailyChores, newChoreObj]
-      }));
+      saveToCloud({
+        dailyChores: [...state.dailyChores, newChoreObj]
+      });
       notify("Chore Added!", "success");
     }
   };
 
-  return { state, notification, actions };
+  return { state, notification, connected, actions };
 };
 
 // --- VIEW COMPONENTS ---
@@ -249,7 +275,7 @@ const Notification = ({ message, type, show }) => (
   </div>
 );
 
-const Header = ({ state, setAgeGroup, toggleParentMode }) => (
+const Header = ({ state, setAgeGroup, toggleParentMode, connected }) => (
   <div className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white p-4 pt-6 rounded-b-[2rem] shadow-lg relative overflow-hidden">
     <div className="absolute top-0 right-0 w-32 h-32 bg-white opacity-10 rounded-full -mr-10 -mt-10 blur-xl"></div>
     <div className="max-w-md mx-auto relative z-10">
@@ -258,7 +284,10 @@ const Header = ({ state, setAgeGroup, toggleParentMode }) => (
           <div className="w-12 h-12 bg-yellow-300 rounded-full flex items-center justify-center border-4 border-white/20 shadow-inner animate-bounce-slow text-2xl">🦁</div>
           <div>
             <h1 className="font-bold text-xl leading-none tracking-tight">CoinQuest</h1>
-            <div className="text-xs text-indigo-200 mt-1 font-medium">Lvl {state.level} • {state.xp} XP</div>
+            <div className="flex items-center gap-2">
+                <span className="text-xs text-indigo-200 mt-1 font-medium">Lvl {state.level}</span>
+                {connected ? <span className="flex items-center text-[10px] bg-green-500/20 px-2 rounded text-green-200"><Wifi size={10} className="mr-1"/> Cloud</span> : <span className="flex items-center text-[10px] bg-red-500/20 px-2 rounded text-red-200"><WifiOff size={10} className="mr-1"/> Offline</span>}
+            </div>
           </div>
         </div>
         <button onClick={toggleParentMode} className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${state.parentMode ? 'bg-red-500 text-white' : 'bg-white/20 text-white hover:bg-white/40'}`}>
@@ -277,14 +306,14 @@ const Header = ({ state, setAgeGroup, toggleParentMode }) => (
           <div className="text-right">
               <p className="text-xs text-purple-200 uppercase tracking-wider font-bold mb-1">Net Worth</p>
               <div className="text-xl font-bold text-purple-100">
-                ${(state.balance + Object.values(state.stocks).reduce((a, s) => a + (s.price * s.owned), 0)).toLocaleString()}
+                ${(state.balance + Object.values(state.stocks || {}).reduce((a, s) => a + (s.price * s.owned), 0)).toLocaleString()}
               </div>
           </div>
         </div>
       ) : (
         <div className="bg-white/10 rounded-xl p-3 backdrop-blur-sm border border-white/20">
           <h2 className="font-bold flex items-center gap-2"><Shield size={16} /> Parent Dashboard</h2>
-          <p className="text-xs text-indigo-200">Review requests & manage chores</p>
+          <p className="text-xs text-indigo-200">Sync ID: {FAMILY_ID}</p>
         </div>
       )}
     </div>
@@ -383,7 +412,7 @@ const Invest = ({ stocks, balance, onBuy, onSell }) => (
       <div className="absolute -right-4 -bottom-8 text-8xl opacity-20">🏙️</div>
     </div>
     <div className="grid gap-3">
-      {Object.entries(stocks).map(([ticker, stock]) => (
+      {Object.entries(stocks || {}).map(([ticker, stock]) => (
         <div key={ticker} className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
           <div className="flex justify-between items-start mb-2">
             <div><h3 className="font-bold text-slate-700">{stock.name}</h3><div className="flex items-center gap-2 mt-1"><span className="text-[10px] font-bold bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded uppercase tracking-wider">{ticker}</span><span className="text-xs text-slate-400">Owned: {stock.owned}</span></div></div>
@@ -458,12 +487,14 @@ const ParentDashboard = ({ state, onApprove, onDeny, onAddChore }) => {
 
 export default function App() {
   const [view, setView] = useState('home');
-  const { state, notification, actions } = useGameData();
+  const { state, notification, connected, actions } = useGameData();
+
+  if (!state) return <div className="min-h-screen flex items-center justify-center text-slate-400">Loading Cloud Save...</div>;
 
   return (
     <div className="max-w-md mx-auto min-h-screen bg-white shadow-2xl overflow-hidden relative">
       <Notification {...notification} />
-      <Header state={state} setAgeGroup={actions.setAgeGroup} toggleParentMode={actions.toggleParentMode} />
+      <Header state={state} setAgeGroup={actions.setAgeGroup} toggleParentMode={actions.toggleParentMode} connected={connected} />
       <main className="p-4 bg-pattern min-h-[calc(100vh-200px)]">
         {state.parentMode ? (
           <ParentDashboard state={state} onApprove={actions.approveRequest} onDeny={actions.denyRequest} onAddChore={actions.addCustomChore} />
