@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Lock, Unlock, Shield, Home, CheckCircle, TrendingUp, Heart, ShoppingBag,
-  ClipboardCheck, PlusCircle, Wifi, WifiOff, LogOut, LogIn
+  ClipboardCheck, PlusCircle, Wifi, WifiOff, LogOut, LogIn, AlertCircle
 } from 'lucide-react';
 
 // FIREBASE IMPORTS
@@ -489,13 +489,15 @@ const ParentDashboard = ({ state, user, onApprove, onDeny, onAddChore }) => {
   );
 };
 
-const LoginScreen = ({ onLogin }) => (
+const LoginScreen = ({ onLogin, error }) => (
   <div className="min-h-screen bg-indigo-600 flex flex-col items-center justify-center p-6 text-center">
     <div className="bg-white w-full max-w-sm rounded-3xl p-8 shadow-2xl animate-slide-up">
       <div className="w-20 h-20 bg-yellow-400 rounded-full flex items-center justify-center text-4xl mb-6 mx-auto shadow-lg">🦁</div>
       <h1 className="text-2xl font-black text-slate-800 mb-2">Welcome to CoinQuest</h1>
       <p className="text-slate-500 mb-8 text-sm">The fun way to learn money skills.</p>
       
+      {error && <div className="bg-red-100 text-red-600 p-3 rounded-lg mb-4 text-sm flex items-center gap-2 text-left"><AlertCircle size={16} />{error}</div>}
+
       <button 
         onClick={onLogin}
         className="w-full bg-slate-900 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-3 hover:bg-slate-800 transition-colors shadow-lg"
@@ -514,6 +516,7 @@ export default function App() {
   const [view, setView] = useState('home');
   const [user, setUser] = useState(null);
   const [loadingUser, setLoadingUser] = useState(true);
+  const [loginError, setLoginError] = useState(null);
   
   // Auth Listener
   useEffect(() => {
@@ -527,10 +530,28 @@ export default function App() {
   const { state, notification, connected, actions } = useGameData(user);
 
   const handleLogin = async () => {
+    setLoginError(null);
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (error) {
       console.error("Login failed", error);
+      let errorMsg = "Login failed. Please try again.";
+      
+      // DIAGNOSTIC ERROR MESSAGES
+      if (error.code === 'auth/unauthorized-domain') {
+        errorMsg = `⚠️ DOMAIN ERROR: You must add '${window.location.hostname}' to Firebase Console -> Auth -> Settings -> Authorized Domains.`;
+      } else if (error.code === 'auth/popup-closed-by-user') {
+        errorMsg = "Login canceled by user.";
+      } else if (error.code === 'auth/invalid-api-key') {
+        errorMsg = "⚠️ API KEY ERROR: Your API Key is missing or invalid. Check src/lib/firebase.js.";
+      } else if (error.code === 'auth/operation-not-allowed') {
+        errorMsg = "⚠️ CONFIG ERROR: Google Sign-In is not enabled in Firebase Console.";
+      } else {
+        // Show raw error for anything else
+        errorMsg = `Error: ${error.message} (${error.code})`;
+      }
+      
+      setLoginError(errorMsg);
     }
   };
 
@@ -540,7 +561,7 @@ export default function App() {
 
   if (loadingUser) return <div className="min-h-screen bg-indigo-600 flex items-center justify-center text-white">Loading...</div>;
 
-  if (!user) return <LoginScreen onLogin={handleLogin} />;
+  if (!user) return <LoginScreen onLogin={handleLogin} error={loginError} />;
 
   if (!state) return <div className="min-h-screen bg-indigo-600 flex items-center justify-center text-white">Syncing your Family Data...</div>;
 

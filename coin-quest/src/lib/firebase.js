@@ -3,13 +3,14 @@ import { getFirestore } from "firebase/firestore";
 import { getAuth, GoogleAuthProvider } from "firebase/auth";
 
 // Configuration uses Environment Variables (from .env file)
+// Ensure you have created a .env file in the root directory with these values.
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID
+  apiKey: "AIzaSyDx84KrNm_eco_zJ7fnAVrpHzc9HyQrDvQ",
+  authDomain: "coinquest-613bc.firebaseapp.com",
+  projectId: "coinquest-613bc",
+  storageBucket: "coinquest-613bc.firebasestorage.app",
+  messagingSenderId: "914748706075",
+  appId: "1:914748706075:web:92433e17d88aa301b9d7be"
 };
 
 // Initialize Firebase
